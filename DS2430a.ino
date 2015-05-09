@@ -1,65 +1,144 @@
+#include <Wire.h>
+#include <OzOLED.h>
 #include <OneWire.h>
 #include <EEPROM.h>
 #include <Bounce2.h>
 
 #define BUS_PIN 6
-#define SAVE_PIN 2
-#define WRITE_PIN 3
-#define WRITE2_PIN 4
+#define SAVE_PIN 2 // Read and save connected DS2430a
+#define WRITE_PIN 3 // Write EEPROM data to connected DS2430a from saved
+#define WRITE2_PIN 4 // Write AppReg data to connected DS2430a from saved value
+#define PRINT_PIN 5 // Print connected DS2430a (do not overwrite previously saved data)
 
 OneWire bus(BUS_PIN); // OneWire bus on digital pin 6
 
 Bounce saveBtn = Bounce(); // Read all button.
 Bounce writeBtn = Bounce(); // Write data button.
 Bounce write2Btn = Bounce(); // Write app reg data.
+Bounce printBtn = Bounce(); // Print data.
 
-struct eeStruct { 
+struct eeStruct {
   byte data[32];
   byte appReg[8];
 };
 typedef struct eeStruct ee_t;
 
+char hexmap[] = {
+  '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+
 void setup() {
-  pinMode(13, OUTPUT);  
+  pinMode(13, OUTPUT);
   pinMode(SAVE_PIN, INPUT_PULLUP);
   saveBtn.attach(SAVE_PIN);
-  saveBtn.interval(50);
+  saveBtn.interval(3000);
   pinMode(WRITE_PIN, INPUT_PULLUP);
   writeBtn.attach(WRITE_PIN);
-  writeBtn.interval(50);
+  writeBtn.interval(3000);
   pinMode(WRITE2_PIN, INPUT_PULLUP);
   write2Btn.attach(WRITE2_PIN);
-  write2Btn.interval(50);
+  write2Btn.interval(3000);
+  pinMode(PRINT_PIN, INPUT_PULLUP);
+  printBtn.attach(PRINT_PIN);
+  printBtn.interval(3000);
 
-  Serial.begin (9600);
+  OzOled.init();
+  // Charge pump ON.
+  OzOled.sendCommand(0x8d);
+  OzOled.sendCommand(0x14);
+  // Rotate 180.
+  OzOled.sendCommand(0xc8);
+  OzOled.sendCommand(0xa1);
+  OzOled.sendCommand(0x0da);
+  OzOled.sendCommand(0x012);
   
+  printState("OK, Yurik");
+
   //byte data[32] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32};
   //writeData(bus, data);
+}
+
+void printConnected() {
+  if (!isChipConnected()) {
+    printState("!!! Chip absent");
+    blinkLed(5);
+    return;
+  }
+
+  ee_t ee = ee_t();
+  readData(bus, ee.data);
+  readApplicationRegister(bus, ee.appReg);
+  
+  blinkLed(1);
+  
+  OzOled.clearDisplay();
+  
+  OzOled.printString("Print OK");
+  OzOled.setCursorXY(0, 1);
+  
+  OzOled.setHorizontalMode();      //Set addressing mode to Horizontal Mode
+  OzOled.printString("Connected chip: ");
+  printData(ee.data, 32);
+  printData(ee.appReg, 8);
+  OzOled.setNormalDisplay();       //Set display to Normal mode
+}
+
+void printState(const char *lastState) {
+  ee_t ee = ee_t();
+  EEPROM_readAnything(0, &ee, sizeof(ee));
+
+  OzOled.clearDisplay();
+  
+  OzOled.printString(lastState);
+  OzOled.setCursorXY(0, 1);
+  
+  OzOled.setHorizontalMode();      //Set addressing mode to Horizontal Mode
+  OzOled.printString("Saved EEPROM/AR:");
+  printData(ee.data, 32);
+  printData(ee.appReg, 8);
+  OzOled.setNormalDisplay();       //Set display to Normal mode
+}
+
+void printData(byte* buf, byte bufSize) {
+  char hex[2];
+  for (int i = 0; i < bufSize; i++) {
+    byte n = buf[i];
+    byte2hex(n, hex);
+    OzOled.printChar(hex[0]);
+    OzOled.printChar(hex[1]);
+  }
+}
+
+char byte2hex(byte n, char* buf) {
+  buf[0] = hexmap[(n & 0xF0) >> 4];
+  buf[1] = hexmap[n & 0x0F];
 }
 
 void loop() {
   boolean saveChanged = saveBtn.update();
   boolean writeChanged = writeBtn.update();
   boolean write2Changed = write2Btn.update();
+  boolean printChanged = printBtn.update();  
 
   if (saveChanged && saveBtn.read() == LOW) {
-    Serial.println("Save");
     saveAll();
   }
 
   if (writeChanged && writeBtn.read() == LOW) {
-    Serial.println("Write EEPROM");
     writeData();
   }
 
   if (write2Changed && write2Btn.read() == LOW) {
-    Serial.println("Write Application Register");
     writeAppReg();
+  }
+  
+  if (printChanged && printBtn.read() == LOW) {
+    printConnected();
   }
 }
 
 void saveAll() {
   if (!isChipConnected()) {
+    printState("!!! Chip absent");
     blinkLed(5);
     return;
   }
@@ -68,78 +147,79 @@ void saveAll() {
   readData(bus, ee.data);
   readApplicationRegister(bus, ee.appReg);
 
-  dump(ee.data, 32, "Read: EEPROM=");
-  dump(ee.appReg, 8, "Read: APPREG=");
-
   EEPROM_writeAnything(0, &ee, sizeof(ee));
 
   ee_t ee2 = ee_t();
   EEPROM_readAnything(0, &ee2, sizeof(ee2));
-  dump(ee2.data, 32, "Saved: EEPROM=");
-  dump(ee2.appReg, 8, "Saved: APPREG=");
 
   if (!validate(&ee, &ee2, 0, sizeof(ee))) {
     blinkLed(10);
+    printState("!!! Invalid");
     return;
   }
 
   blinkLed(1);
+  printState("Read OK");
 }
 
 void writeData() {
   if (!isChipConnected()) {
     blinkLed(5);
+    printState("!!! Chip absent");
     return;
   }
 
   ee_t ee = ee_t();
 
   EEPROM_readAnything(0, &ee, sizeof(ee));
-  dump(ee.data, 32, "Saved: EEPROM=");
 
   if (!writeData(bus, ee.data)) {
     blinkLed(10);
+    printState("!!! Failed");
     return;
   }
 
   ee_t ee2 = ee_t();
   readData(bus, ee2.data);
-  dump(ee2.data, 32, "Written: EEPROM=");
 
   if (!validate(&ee, &ee2, 0, 32)) { // Validate data only.
     blinkLed(10);
+    printState("!!! Invalid");
     return;
   }
 
   blinkLed(1);
+  printState("Write EEPROM OK");
 }
 
 void writeAppReg() {
   if (!isChipConnected()) {
     blinkLed(5);
+    printState("!!! Chip absent");
     return;
   }
 
   ee_t ee = ee_t();
 
   EEPROM_readAnything(0, &ee, sizeof(ee));
-  dump(ee.appReg, 8, "Saved: APPREG=");
 
   if (!writeApplicationRegister(bus, ee.appReg)) {
     blinkLed(10);
+    printState("!!! Failed");    
     return;
   }
 
   ee_t ee2 = ee_t();
   readApplicationRegister(bus, ee2.appReg);
-  dump(ee2.appReg, 8, "Written: APPREG=");
 
-  if (!validate(&ee, &ee2, 32, 32+8)) { // Validate data only.
+  if (!validate(&ee, &ee2, 32, 32 + 8)) { // Validate data only.
     blinkLed(10);
+    printState("!!! Invalid");
     return;
   }
 
   blinkLed(1);
+  printState("!!! Write AR OK");
 }
 
 boolean isChipConnected() {
@@ -154,15 +234,6 @@ boolean isChipConnected() {
   }
 
   return true;
-}
-
-void dump(byte *data, byte dataSize, char *str) {
-  Serial.write(str);
-  for (byte ii = 0; ii < dataSize; ii++) {
-    Serial.write(' ');
-    Serial.print(data[ii], HEX);
-  }
-  Serial.println();
 }
 
 void readRom(OneWire bus, byte data[8]) {
@@ -303,5 +374,3 @@ void blinkLed(int cnt) {
     delay(150);
   }
 }
-
-
